@@ -32,6 +32,9 @@ STYLE_ALIASES = {"pixel": "classic", "hd": "hd", "hd_pixel": "hd", "retro": "ret
 STYLE_NAMES = {"classic": "Classic", "hd": "HD Pixel", "gameboy": "GameBoy", "nes": "NES", "snes": "SNES", "minecraft": "Minecraft", "lego": "LEGO", "pico8": "Pico-8", "c64": "Commodore64", "retro": "Retro RPG"}
 QUALITY_MODES = ("fast", "normal", "hd")
 GENERATION_MODES = ("classic", "ai")
+STYLE_ALIASES = {"pixel": "classic", "hd": "hd", "gameboy": "gameboy", "nes": "nes", "snes": "snes", "minecraft": "minecraft", "lego": "lego", "pico8": "pico8", "c64": "c64", "commodore64": "c64"}
+STYLE_NAMES = {"classic": "Classic", "hd": "HD Pixel", "gameboy": "GameBoy", "nes": "NES", "snes": "SNES", "minecraft": "Minecraft", "lego": "LEGO", "pico8": "Pico-8", "c64": "Commodore64"}
+QUALITY_MODES = ("fast", "normal", "hd")
 OUTLINE_LEVELS = {"off": 0, "thin": 1, "medium": 2, "thick": 3}
 
 @dataclass
@@ -271,6 +274,7 @@ def process_image(input_file: str, output_file: str, options: ProcessingOptions)
     if options.generation_mode == "ai":
         return generate_ai_pixel_art(input_file, output_file, options)
 
+def process_image(input_file: str, output_file: str, options: ProcessingOptions) -> str:
     start = time.perf_counter()
     image, alpha = _read_image(input_file)
     h, w = image.shape[:2]

@@ -14,6 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from image_tools import ProcessingOptions, create_comparison, process_image
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw
+
+from image_tools import ProcessingOptions, create_comparison, process_image
+
+ROOT = Path(__file__).resolve().parents[1]
 INPUT_DIR = ROOT / "test_outputs" / "originals"
 OUTPUT_DIR = ROOT / "test_outputs" / "processed"
 COMPARE_DIR = ROOT / "test_outputs" / "comparisons"

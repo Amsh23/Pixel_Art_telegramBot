@@ -66,6 +66,7 @@ def settings_keyboard(options: ProcessingOptions) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧠 Mode", callback_data="menu:mode"), InlineKeyboardButton("🎨 Style", callback_data="menu:style")],
         [InlineKeyboardButton("⚙️ Quality", callback_data="menu:quality"), InlineKeyboardButton("🤖 AI Prompt", callback_data="action:ai_prompt")],
+        [InlineKeyboardButton("🎨 Style", callback_data="menu:style"), InlineKeyboardButton("⚙️ Quality", callback_data="menu:quality")],
         [InlineKeyboardButton("🔲 Pixel Size", callback_data="menu:pixel"), InlineKeyboardButton("🌈 Palette Size", callback_data="menu:palette")],
         [InlineKeyboardButton("✒️ Outline", callback_data="menu:outline"), InlineKeyboardButton("✨ Effects", callback_data="menu:effects")],
         [InlineKeyboardButton("✅ Process Image", callback_data="action:process")],
@@ -105,6 +106,11 @@ async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     palette_size = 4 if cmd == "gameboy" else (32 if cmd == "snes" else opts.palette_size)
     outline = "thin" if cmd in ("hd", "hd_pixel", "retro") else opts.outline
     USER_SETTINGS[uid] = replace(opts, style=style, quality=quality, generation_mode=generation_mode, palette_size=palette_size, outline=outline)
+    cmd = update.message.text.lstrip("/").split()[0].lower()
+    style = STYLE_ALIASES[cmd]
+    quality = "hd" if cmd == "hd" else USER_SETTINGS[uid].quality
+    palette_size = 4 if cmd == "gameboy" else (32 if cmd == "snes" else USER_SETTINGS[uid].palette_size)
+    USER_SETTINGS[uid] = replace(USER_SETTINGS[uid], style=style, quality=quality, palette_size=palette_size)
     await update.message.reply_text(f"Style set to {STYLE_NAMES[style]}. Send a photo or use /settings.")
 
 
