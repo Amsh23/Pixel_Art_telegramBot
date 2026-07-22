@@ -5,6 +5,15 @@ PNG files under test_outputs/. It also verifies that every processed output is a
 nearest-neighbor pixel grid with a bounded palette instead of a blurred resize.
 """
 from pathlib import Path
+import sys
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from image_tools import ProcessingOptions, create_comparison, process_image
 
 import cv2
 import numpy as np

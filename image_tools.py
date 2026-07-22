@@ -1,5 +1,10 @@
+import base64
+import io
+import json
 import os
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -20,8 +25,13 @@ STYLE_PALETTES: Dict[str, List[Color]] = {
     "lego": [(242, 205, 55), (201, 26, 9), (0, 85, 191), (35, 120, 65), (88, 42, 18), (27, 42, 52), (255, 255, 255), (161, 165, 162), (109, 110, 108), (0, 0, 0), (254, 138, 24), (180, 210, 227), (51, 0, 114), (255, 158, 205), (187, 233, 11), (129, 0, 123)],
     "pico8": [(0, 0, 0), (29, 43, 83), (126, 37, 83), (0, 135, 81), (171, 82, 54), (95, 87, 79), (194, 195, 199), (255, 241, 232), (255, 0, 77), (255, 163, 0), (255, 236, 39), (0, 228, 54), (41, 173, 255), (131, 118, 156), (255, 119, 168), (255, 204, 170)],
     "c64": [(0, 0, 0), (255, 255, 255), (136, 0, 0), (170, 255, 238), (204, 68, 204), (0, 204, 85), (0, 0, 170), (238, 238, 119), (221, 136, 85), (102, 68, 0), (255, 119, 119), (51, 51, 51), (119, 119, 119), (170, 255, 102), (0, 136, 255), (187, 187, 187)],
+    "retro": [(8, 8, 16), (32, 24, 48), (64, 40, 88), (96, 56, 112), (144, 72, 120), (192, 88, 112), (224, 128, 96), (248, 184, 120), (255, 224, 168), (216, 248, 184), (144, 216, 144), (80, 176, 136), (56, 120, 152), (72, 80, 160), (128, 112, 184), (224, 192, 216)],
 }
 
+STYLE_ALIASES = {"pixel": "classic", "hd": "hd", "hd_pixel": "hd", "retro": "retro", "gameboy": "gameboy", "nes": "nes", "snes": "snes", "minecraft": "minecraft", "lego": "lego", "pico8": "pico8", "c64": "c64", "commodore64": "c64"}
+STYLE_NAMES = {"classic": "Classic", "hd": "HD Pixel", "gameboy": "GameBoy", "nes": "NES", "snes": "SNES", "minecraft": "Minecraft", "lego": "LEGO", "pico8": "Pico-8", "c64": "Commodore64", "retro": "Retro RPG"}
+QUALITY_MODES = ("fast", "normal", "hd")
+GENERATION_MODES = ("classic", "ai")
 STYLE_ALIASES = {"pixel": "classic", "hd": "hd", "gameboy": "gameboy", "nes": "nes", "snes": "snes", "minecraft": "minecraft", "lego": "lego", "pico8": "pico8", "c64": "c64", "commodore64": "c64"}
 STYLE_NAMES = {"classic": "Classic", "hd": "HD Pixel", "gameboy": "GameBoy", "nes": "NES", "snes": "SNES", "minecraft": "Minecraft", "lego": "LEGO", "pico8": "Pico-8", "c64": "Commodore64"}
 QUALITY_MODES = ("fast", "normal", "hd")
@@ -50,6 +60,10 @@ class ProcessingOptions:
     sharpen: bool = True
     denoise: bool = False
     gamma: float = 1.0
+    generation_mode: str = "classic"
+    ai_prompt: str = ""
+    ai_strength: float = 0.55
+    ai_steps: int = 28
 
 
 def _palette_array(style: str, palette_size: int) -> np.ndarray:
@@ -192,6 +206,73 @@ def _analysis_log(analysis: ImageAnalysis, elapsed: float, output_size: Tuple[in
         f"dominant={analysis.dominant_colors} time={elapsed:.2f}s output={output_size[0]}x{output_size[1]}"
     )
 
+
+
+def build_pixel_art_prompt(options: ProcessingOptions, analysis: ImageAnalysis) -> str:
+    style_name = STYLE_NAMES.get(options.style, options.style)
+    custom = f", {options.ai_prompt.strip()}" if options.ai_prompt.strip() else ""
+    return (
+        f"professional {style_name} pixel art, {options.quality} quality, 8-bit and 16-bit game asset, "
+        f"RPG sprite style, clean black outlines, limited {options.palette_size} color palette, detailed cel shading, "
+        f"crisp square pixels, preserve original character pose and composition, aspect ratio {analysis.aspect_ratio:.2f}{custom}"
+    )
+
+
+def prepare_ai_source(input_file: str, output_file: str, options: ProcessingOptions) -> Tuple[str, str]:
+    image, alpha = _read_image(input_file)
+    analysis = analyze_image_array(image, options.pixel_size, options.palette_size)
+    block = max(4, min(16, analysis.chosen_pixel_size))
+    grid_w = max(32, min(128, analysis.width // block))
+    grid_h = max(32, min(128, analysis.height // block))
+    preview_options = ProcessingOptions(
+        style=options.style, pixel_size=max(1, analysis.width // grid_w), palette_size=options.palette_size,
+        quality="hd", outline="thin", dithering=True, sharpen=True, generation_mode="classic"
+    )
+    process_image(input_file, output_file, preview_options)
+    return output_file, build_pixel_art_prompt(options, analysis)
+
+
+def generate_ai_pixel_art(input_file: str, output_file: str, options: ProcessingOptions) -> str:
+    endpoint = os.getenv("STABLE_DIFFUSION_API_URL", "").strip()
+    api_key = os.getenv("STABLE_DIFFUSION_API_KEY", "").strip()
+    prepared_file = output_file.replace(".png", "_ai_source.png")
+    source_file, prompt = prepare_ai_source(input_file, prepared_file, options)
+    if not endpoint:
+        print("AI Pixel debug | STABLE_DIFFUSION_API_URL is not configured; returning AI-ready source image")
+        Image.open(source_file).save(output_file)
+        return output_file
+
+    with open(source_file, "rb") as image_fp:
+        init_image = base64.b64encode(image_fp.read()).decode("ascii")
+    payload = {
+        "prompt": prompt,
+        "negative_prompt": "blurry, smooth gradients, photorealistic, anti-aliased, noisy, deformed, extra limbs",
+        "init_images": [init_image],
+        "denoising_strength": options.ai_strength,
+        "steps": options.ai_steps,
+        "cfg_scale": 8,
+        "sampler_name": "DPM++ 2M Karras",
+    }
+    request = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+    if api_key:
+        request.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Stable Diffusion API request failed: {exc}") from exc
+    images = data.get("images") or data.get("artifacts") or []
+    if not images:
+        raise RuntimeError("Stable Diffusion API response did not contain generated images")
+    encoded = images[0].get("base64") if isinstance(images[0], dict) else images[0]
+    if isinstance(encoded, str) and "," in encoded and encoded.startswith("data:image"):
+        encoded = encoded.split(",", 1)[1]
+    Image.open(io.BytesIO(base64.b64decode(encoded))).save(output_file)
+    return output_file
+
+def process_image(input_file: str, output_file: str, options: ProcessingOptions) -> str:
+    if options.generation_mode == "ai":
+        return generate_ai_pixel_art(input_file, output_file, options)
 
 def process_image(input_file: str, output_file: str, options: ProcessingOptions) -> str:
     start = time.perf_counter()
