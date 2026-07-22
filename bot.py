@@ -17,6 +17,7 @@ from telegram.ext import (
 from config import TOKEN
 from image_tools import (
     ProcessingOptions,
+    QUALITY_MODES,
     STYLE_ALIASES,
     STYLE_NAMES,
     cleanup_temp,
@@ -52,17 +53,18 @@ COMMANDS = [
 def settings_text(options: ProcessingOptions) -> str:
     return (
         f"Style: {STYLE_NAMES.get(options.style, options.style)}\n"
-        f"Pixel Size: {options.pixel_size}\nPalette Size: {options.palette_size}\n"
+        f"Quality: {options.quality.upper()}\n"
+        f"Pixel Size: {options.pixel_size or 'Auto'}\nPalette Size: {options.palette_size}\n"
         f"Outline: {options.outline.title()}\nDithering: {'On' if options.dithering else 'Off'}\n"
-        f"Denoise: {'On' if options.denoise else 'Off'}"
+        f"Sharpen: {'On' if options.sharpen else 'Off'}\nDenoise: {'On' if options.denoise else 'Off'}"
     )
 
 
 def settings_keyboard(options: ProcessingOptions) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎨 Style", callback_data="menu:style"), InlineKeyboardButton("🔲 Pixel Size", callback_data="menu:pixel")],
-        [InlineKeyboardButton("🌈 Palette Size", callback_data="menu:palette"), InlineKeyboardButton("✒️ Outline", callback_data="menu:outline")],
-        [InlineKeyboardButton(f"Dithering: {'On' if options.dithering else 'Off'}", callback_data="set:dithering:toggle")],
+        [InlineKeyboardButton("🎨 Style", callback_data="menu:style"), InlineKeyboardButton("⚙️ Quality", callback_data="menu:quality")],
+        [InlineKeyboardButton("🔲 Pixel Size", callback_data="menu:pixel"), InlineKeyboardButton("🌈 Palette Size", callback_data="menu:palette")],
+        [InlineKeyboardButton("✒️ Outline", callback_data="menu:outline"), InlineKeyboardButton("✨ Effects", callback_data="menu:effects")],
         [InlineKeyboardButton("✅ Process Image", callback_data="action:process")],
     ])
 
@@ -86,8 +88,11 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    style = STYLE_ALIASES[update.message.text.lstrip("/").split()[0].lower()]
-    USER_SETTINGS[uid] = replace(USER_SETTINGS[uid], style=style)
+    cmd = update.message.text.lstrip("/").split()[0].lower()
+    style = STYLE_ALIASES[cmd]
+    quality = "hd" if cmd == "hd" else USER_SETTINGS[uid].quality
+    palette_size = 4 if cmd == "gameboy" else (32 if cmd == "snes" else USER_SETTINGS[uid].palette_size)
+    USER_SETTINGS[uid] = replace(USER_SETTINGS[uid], style=style, quality=quality, palette_size=palette_size)
     await update.message.reply_text(f"Style set to {STYLE_NAMES[style]}. Send a photo or use /settings.")
 
 
@@ -151,7 +156,8 @@ async def process_last_image(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text("🖼 Processing pixel art...")
     process_image(LAST_IMAGE[uid], output_path, USER_SETTINGS[uid])
     LAST_OUTPUT[uid] = output_path
-    USER_HISTORY[uid].appendleft(f"{STYLE_NAMES[USER_SETTINGS[uid].style]} - {USER_SETTINGS[uid].pixel_size}px - {os.path.basename(output_path)}")
+    pixel_label = USER_SETTINGS[uid].pixel_size or "Auto"
+    USER_HISTORY[uid].appendleft(f"{STYLE_NAMES[USER_SETTINGS[uid].style]} - {pixel_label}px - {os.path.basename(output_path)}")
     with open(output_path, "rb") as img:
         await update.effective_message.reply_photo(img, caption="✅ Done! Use /compare, /palette, or /info for more.")
 
@@ -165,21 +171,31 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu:style":
         rows = [[InlineKeyboardButton(name, callback_data=f"set:style:{key}")] for key, name in STYLE_NAMES.items()]
         await query.edit_message_text("Choose style:", reply_markup=InlineKeyboardMarkup(rows)); return
+    if data == "menu:quality":
+        await query.edit_message_text("Choose quality mode:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(v.upper(), callback_data=f"set:quality:{v}") for v in QUALITY_MODES]])); return
     if data == "menu:pixel":
-        await query.edit_message_text("Choose pixel size:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(str(v), callback_data=f"set:pixel_size:{v}") for v in (4,8,16)], [InlineKeyboardButton(str(v), callback_data=f"set:pixel_size:{v}") for v in (32,64,128)]])); return
+        await query.edit_message_text("Choose pixel size:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Auto", callback_data="set:pixel_size:auto"), InlineKeyboardButton("4", callback_data="set:pixel_size:4"), InlineKeyboardButton("8", callback_data="set:pixel_size:8")], [InlineKeyboardButton(str(v), callback_data=f"set:pixel_size:{v}") for v in (16,32,64)]])); return
     if data == "menu:palette":
         await query.edit_message_text("Choose palette size:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(str(v), callback_data=f"set:palette_size:{v}") for v in (8,16,32)], [InlineKeyboardButton(str(v), callback_data=f"set:palette_size:{v}") for v in (64,128,256)]])); return
     if data == "menu:outline":
         await query.edit_message_text("Choose outline:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(v.title(), callback_data=f"set:outline:{v}") for v in ("off","thin","medium","thick")]])); return
+    if data == "menu:effects":
+        await query.edit_message_text("Toggle effects:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"Dither: {'On' if opts.dithering else 'Off'}", callback_data="set:dithering:toggle")], [InlineKeyboardButton(f"Sharpen: {'On' if opts.sharpen else 'Off'}", callback_data="set:sharpen:toggle")], [InlineKeyboardButton(f"Denoise: {'On' if opts.denoise else 'Off'}", callback_data="set:denoise:toggle")]])); return
     if data == "action:process":
         await process_last_image(update, context); return
     _, field, value = data.split(":", 2)
     if field == "dithering":
         opts = replace(opts, dithering=not opts.dithering)
+    elif field == "sharpen":
+        opts = replace(opts, sharpen=not opts.sharpen)
+    elif field == "denoise":
+        opts = replace(opts, denoise=not opts.denoise)
+    elif field == "quality":
+        opts = replace(opts, quality=value)
     elif field == "style":
         opts = replace(opts, style=value)
     elif field == "pixel_size":
-        opts = replace(opts, pixel_size=int(value))
+        opts = replace(opts, pixel_size=None if value == "auto" else int(value))
     elif field == "palette_size":
         opts = replace(opts, palette_size=int(value))
     elif field == "outline":

@@ -1,7 +1,7 @@
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -24,16 +24,30 @@ STYLE_PALETTES: Dict[str, List[Color]] = {
 
 STYLE_ALIASES = {"pixel": "classic", "hd": "hd", "gameboy": "gameboy", "nes": "nes", "snes": "snes", "minecraft": "minecraft", "lego": "lego", "pico8": "pico8", "c64": "c64", "commodore64": "c64"}
 STYLE_NAMES = {"classic": "Classic", "hd": "HD Pixel", "gameboy": "GameBoy", "nes": "NES", "snes": "SNES", "minecraft": "Minecraft", "lego": "LEGO", "pico8": "Pico-8", "c64": "Commodore64"}
-
+QUALITY_MODES = ("fast", "normal", "hd")
 OUTLINE_LEVELS = {"off": 0, "thin": 1, "medium": 2, "thick": 3}
+
+@dataclass
+class ImageAnalysis:
+    width: int
+    height: int
+    aspect_ratio: float
+    complexity: float
+    brightness: float
+    chosen_pixel_size: int
+    grid_size: Tuple[int, int]
+    palette_size: int
+    dominant_colors: List[Color]
 
 @dataclass
 class ProcessingOptions:
     style: str = "classic"
-    pixel_size: int = 16
+    pixel_size: Optional[int] = None  # None means auto-detect from resolution and detail complexity.
     palette_size: int = 16
+    quality: str = "normal"
     outline: str = "off"
-    dithering: bool = False
+    dithering: bool = True
+    sharpen: bool = True
     denoise: bool = False
     gamma: float = 1.0
 
@@ -46,6 +60,52 @@ def _palette_array(style: str, palette_size: int) -> np.ndarray:
         reps = int(np.ceil(palette_size / len(palette)))
         colors = (palette * reps)[:palette_size]
     return np.asarray(colors, dtype=np.float32)
+
+
+def _read_image(path: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    with Image.open(path) as pil:
+        rgba = pil.convert("RGBA")
+    arr = np.asarray(rgba)
+    return arr[:, :, :3].copy(), arr[:, :, 3].copy()
+
+
+def dominant_colors(image: np.ndarray, count: int = 8) -> List[Color]:
+    sample = cv2.resize(image, (min(96, image.shape[1]), min(96, image.shape[0])), interpolation=cv2.INTER_AREA)
+    q = kmeans_palette(sample, count)
+    return [tuple(map(int, c)) for c in q]
+
+
+def calculate_complexity(image: np.ndarray) -> float:
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 80, 160)
+    edge_density = float(np.count_nonzero(edges)) / edges.size
+    texture = float(cv2.Laplacian(gray, cv2.CV_64F).var()) / 1000.0
+    return float(np.clip(edge_density * 1.8 + texture, 0.0, 1.0))
+
+
+def choose_pixel_size(width: int, height: int, complexity: float) -> int:
+    longest = max(width, height)
+    if longest <= 256:
+        base = 4
+    elif longest <= 700:
+        base = 8
+    elif longest <= 1400:
+        base = 16
+    else:
+        base = 32
+    if complexity > 0.45 and longest > 700:
+        base *= 2
+    elif complexity < 0.12 and longest <= 1000:
+        base = max(4, base // 2)
+    return int(np.clip(base, 4, 64))
+
+
+def analyze_image_array(image: np.ndarray, requested_pixel_size: Optional[int], palette_size: int) -> ImageAnalysis:
+    h, w = image.shape[:2]
+    complexity = calculate_complexity(image)
+    block = requested_pixel_size or choose_pixel_size(w, h, complexity)
+    grid = (max(1, w // block), max(1, h // block))
+    return ImageAnalysis(w, h, w / max(h, 1), complexity, float(np.mean(image)), block, grid, palette_size, dominant_colors(image, min(8, palette_size)))
 
 
 def apply_auto_contrast(image: np.ndarray) -> np.ndarray:
@@ -63,8 +123,8 @@ def apply_clahe(image: np.ndarray) -> np.ndarray:
 
 
 def sharpen(image: np.ndarray) -> np.ndarray:
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-    return cv2.filter2D(image, -1, kernel)
+    blurred = cv2.GaussianBlur(image, (0, 0), 1.0)
+    return cv2.addWeighted(image, 1.55, blurred, -0.55, 0)
 
 
 def gamma_correct(image: np.ndarray, gamma: float) -> np.ndarray:
@@ -73,18 +133,26 @@ def gamma_correct(image: np.ndarray, gamma: float) -> np.ndarray:
     return cv2.LUT(image, table)
 
 
+def kmeans_palette(image: np.ndarray, clusters: int) -> np.ndarray:
+    pixels = image.reshape((-1, 3)).astype(np.float32)
+    if len(pixels) > 25000:
+        pixels = pixels[np.random.default_rng(42).choice(len(pixels), 25000, replace=False)]
+    k = max(1, min(int(clusters), len(pixels)))
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
+    _, _, centers = cv2.kmeans(pixels, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+    return np.clip(centers, 0, 255).astype(np.float32)
+
+
+def kmeans_color_quantization(image: np.ndarray, clusters: int) -> np.ndarray:
+    """Backward-compatible helper that quantizes an image to a learned K-Means palette."""
+    palette = kmeans_palette(image, clusters)
+    return quantize_to_palette(image, palette)
+
+
 def quantize_to_palette(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
     flat = image.reshape((-1, 3)).astype(np.float32)
     distances = np.sum((flat[:, None, :] - palette[None, :, :]) ** 2, axis=2)
     return palette[np.argmin(distances, axis=1)].reshape(image.shape).astype(np.uint8)
-
-
-def kmeans_color_quantization(image: np.ndarray, clusters: int) -> np.ndarray:
-    pixels = image.reshape((-1, 3)).astype(np.float32)
-    k = max(1, min(int(clusters), len(pixels)))
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 2, cv2.KMEANS_PP_CENTERS)
-    return centers[labels.flatten()].reshape(image.shape).astype(np.uint8)
 
 
 def floyd_steinberg(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
@@ -108,41 +176,72 @@ def add_outline(image: np.ndarray, thickness: int) -> np.ndarray:
     if thickness <= 0:
         return image
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 60, 140)
-    kernel = np.ones((thickness, thickness), np.uint8)
-    edges = cv2.dilate(edges, kernel, iterations=1)
+    edges = cv2.Canny(gray, 50, 120)
+    edges = cv2.dilate(edges, np.ones((thickness, thickness), np.uint8), iterations=1)
     result = image.copy()
     result[edges > 0] = (0, 0, 0)
     return result
 
 
+def _analysis_log(analysis: ImageAnalysis, elapsed: float, output_size: Tuple[int, int]) -> None:
+    print(
+        "PixelArt debug | "
+        f"input={analysis.width}x{analysis.height} aspect={analysis.aspect_ratio:.3f} "
+        f"complexity={analysis.complexity:.3f} pixel_size={analysis.chosen_pixel_size} "
+        f"grid={analysis.grid_size[0]}x{analysis.grid_size[1]} palette={analysis.palette_size} "
+        f"dominant={analysis.dominant_colors} time={elapsed:.2f}s output={output_size[0]}x{output_size[1]}"
+    )
+
+
 def process_image(input_file: str, output_file: str, options: ProcessingOptions) -> str:
-    bgr = cv2.imread(input_file, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise ValueError("Unable to read image file")
-    image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    start = time.perf_counter()
+    image, alpha = _read_image(input_file)
     h, w = image.shape[:2]
     max_side = 1600
     if max(h, w) > max_side:
         scale = max_side / max(h, w)
-        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+        alpha = cv2.resize(alpha, new_size, interpolation=cv2.INTER_AREA) if alpha is not None else None
         h, w = image.shape[:2]
-    image = apply_auto_contrast(image)
-    image = apply_clahe(image)
-    image = sharpen(image)
-    if options.denoise:
-        image = cv2.fastNlMeansDenoisingColored(cv2.cvtColor(image, cv2.COLOR_RGB2BGR), None, 5, 5, 7, 21)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = gamma_correct(image, options.gamma)
-    small_w = max(1, w // options.pixel_size)
-    small_h = max(1, h // options.pixel_size)
-    small = cv2.resize(image, (small_w, small_h), interpolation=cv2.INTER_AREA)
-    small = kmeans_color_quantization(small, options.palette_size)
-    palette = _palette_array(options.style, options.palette_size)
-    small = floyd_steinberg(small, palette) if options.dithering else quantize_to_palette(small, palette)
-    small = add_outline(small, OUTLINE_LEVELS.get(options.outline, 0))
-    result = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-    Image.fromarray(result).save(output_file)
+
+    analysis = analyze_image_array(image, options.pixel_size, options.palette_size)
+    block = analysis.chosen_pixel_size
+    grid_w, grid_h = analysis.grid_size
+    quality = options.quality if options.quality in QUALITY_MODES else ("hd" if options.style == "hd" else "normal")
+
+    work = gamma_correct(image, options.gamma)
+    if quality != "fast":
+        work = apply_auto_contrast(work)
+        if quality == "hd":
+            work = apply_clahe(work)
+        if options.denoise or quality == "hd":
+            den = cv2.fastNlMeansDenoisingColored(cv2.cvtColor(work, cv2.COLOR_RGB2BGR), None, 4, 4, 7, 21)
+            work = cv2.cvtColor(den, cv2.COLOR_BGR2RGB)
+        if options.sharpen or quality == "hd":
+            work = sharpen(work)
+
+    # Build the real pixel grid first, then quantize that grid so the output contains hard-edged blocks.
+    small = cv2.resize(work, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
+    if quality == "fast":
+        palette = _palette_array(options.style, options.palette_size)
+        small = quantize_to_palette(small, palette)
+    else:
+        learned_palette = kmeans_palette(small, options.palette_size)
+        style_palette = _palette_array(options.style, options.palette_size)
+        palette = learned_palette if options.style in ("classic", "hd") else style_palette
+        small = floyd_steinberg(small, palette) if options.dithering or quality == "hd" else quantize_to_palette(small, palette)
+    small = add_outline(small, OUTLINE_LEVELS.get(options.outline, 0) if (options.outline != "off" or quality == "hd") else 0)
+
+    result = cv2.resize(small, (grid_w * block, grid_h * block), interpolation=cv2.INTER_NEAREST)
+    if alpha is not None and np.min(alpha) < 255:
+        alpha_small = cv2.resize(alpha, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
+        alpha_out = cv2.resize(alpha_small, (result.shape[1], result.shape[0]), interpolation=cv2.INTER_NEAREST)
+        out = np.dstack([result, alpha_out])
+        Image.fromarray(out, "RGBA").save(output_file)
+    else:
+        Image.fromarray(result).save(output_file)
+    _analysis_log(analysis, time.perf_counter() - start, (result.shape[1], result.shape[0]))
     return output_file
 
 
@@ -154,7 +253,7 @@ def create_comparison(input_file: str, processed_file: str, output_file: str) ->
     before = Image.open(input_file).convert("RGB")
     after = Image.open(processed_file).convert("RGB")
     before.thumbnail((700, 700), Image.Resampling.LANCZOS)
-    after.thumbnail((700, 700), Image.Resampling.LANCZOS)
+    after.thumbnail((700, 700), Image.Resampling.NEAREST)
     h = max(before.height, after.height) + 50
     w = before.width + after.width + 20
     canvas = Image.new("RGB", (w, h), "white")
@@ -182,9 +281,11 @@ def create_palette_preview(style: str, palette_size: int, output_file: str) -> s
 
 
 def get_image_info(path: str) -> Dict[str, str]:
+    image, _ = _read_image(path)
+    analysis = analyze_image_array(image, None, 16)
     with Image.open(path) as img:
         stat = os.stat(path)
-        return {"format": img.format or "Unknown", "size": f"{img.width}×{img.height}", "mode": img.mode, "file_size": f"{stat.st_size / 1024:.1f} KB"}
+        return {"format": img.format or "Unknown", "size": f"{img.width}×{img.height}", "mode": img.mode, "file_size": f"{stat.st_size / 1024:.1f} KB", "aspect_ratio": f"{analysis.aspect_ratio:.3f}", "complexity": f"{analysis.complexity:.3f}", "auto_pixel_size": str(analysis.chosen_pixel_size), "grid_size": f"{analysis.grid_size[0]}×{analysis.grid_size[1]}", "dominant_colors": str(analysis.dominant_colors)}
 
 
 def cleanup_temp(paths: Iterable[str], older_than_seconds: int = 3600) -> None:
